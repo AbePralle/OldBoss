@@ -1,3 +1,10 @@
+Build
+Test.boss
+
+.*
+*.swp
+.DS_Store
+
 # Prerequisites
 *.d
 
