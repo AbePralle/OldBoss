@@ -2,16 +2,15 @@ module BossVM
 
 local vm = BossVM()
 
-local g = BossObject()
+local type_Object = BossType( "Object" )
 
-local m_add = BossMethod( vm, "add" )
+local m_add = type_Object.add_method( "add" )
 m_add.write( BossOpcode.READ_ARG_1 )
 m_add.write( BossOpcode.READ_ARG_2 )
 m_add.write( BossOpcode.ADD )
 m_add.write( BossOpcode.RETURN )
-g.add( m_add )
 
-local task = g.call( "add", @[3,4] )
+local task = type_Object.call( "add", @[3,4] )
 if (task)
   trace task.is_finished
   if (task.is_finished) trace task.result
@@ -28,12 +27,36 @@ class BossVM [singleton]
     id_list         = String[]
     id_lookup       = StringTable<<Int32>>()
 
+    type_list       = BossType[]
+    type_lookup     = Table<<Int32,Int32>>()
+
     visited_objects = Logical[]
     visited_strings = Logical[]
 
   METHODS
     method init
       BossVM = this   # set singleton
+
+      #method create_object( type_name:String )
+      #method create_global_object(
+
+    method add_type( type:BossType )->Int32
+      local entry = type_lookup.find( type.name_id )
+      local type_index : Int32
+      if (entry)
+        type_index = entry.value
+        type_list[ entry.value ] = type
+      else
+        type_index = type_list.count
+        type_lookup[ type.name_id ] = type_index
+        type_list.add( type )
+      endIf
+      return type_index
+
+    method find_type( name:String )->BossType
+      local entry = type_lookup.find( string_to_id(name) )
+      if (entry) return type_list[ entry.value ]
+      return null
 
     method string_to_id( value:String )->Int32
       local entry = id_lookup.find( value )
@@ -52,19 +75,16 @@ endClass
 
 class BossMethod
   PROPERTIES
-    vm      : BossVM
-    name_id : Int32
     code    = Int32[]
 
   METHODS
-    method init( vm, name:String )
-      name_id = vm.string_to_id( name )
+    method init
 
     method address->Int32
       return code.count
 
     method to->String
-      return vm.id_to_string(name_id) + "()"
+      return "method"
 
     method write( opcode:BossOpcode, value:Int32 )->Int32
       write( opcode->Int32 )
@@ -72,8 +92,8 @@ class BossMethod
 
     method write( opcode:BossOpcode, value:Real64 )->Int32
       write( opcode->Int32 )
-      vm.literal_real64s.add( value )
-      return write( vm.literal_real64s.count - 1 )
+      BossVM.literal_real64s.add( value )
+      return write( BossVM.literal_real64s.count - 1 )
 
     method write( opcode:BossOpcode, value:String )->Int32
       write( opcode->Int32 )
@@ -88,11 +108,11 @@ class BossMethod
       return code.count - 1
 
     method write( value:String )->Int32
-      local entry = vm.string_lookup.find( value )
+      local entry = BossVM.string_lookup.find( value )
       if (entry) return write( entry.value )
 
-      vm.strings.add( value )
-      return write( vm.strings.count - 1 )
+      BossVM.strings.add( value )
+      return write( BossVM.strings.count - 1 )
 endClass
 
 enum BossOpcode
@@ -158,7 +178,7 @@ class BossTask
       ensure stack
       ensure call_stack
 
-      vm = call.m.vm
+      vm = BossVM
       stack.add( call.context )
       frame = BossCallFrame( call.m )
       if (call.args)
@@ -385,20 +405,46 @@ class BossValue( type:BossValueType, value:Real64 ) [compound]
 
 endClass
 
-
-class BossObject
+class BossType
   PROPERTIES
-    methods = BossMethod[](2)
+    type_index           : Int32
+    name_id              : Int32
+    base_types           = BossType[](1)
+    property_count       : Int32
+    property_name_ids    = Int32[](4)
+    method_name_ids      = Int32[](4)
+    methods              = BossMethod[](4)
+    property_slot_lookup = Table<<Int32,Int32>>()
+    method_slot_lookup   = Table<<Int32,Int32>>()
 
   METHODS
-    method add( m:BossMethod )->this
-      methods.add( m )
-      return this
+    method init( name:String, base_type_name=null:String )
+      name_id = BossVM.string_to_id( name )
+      if (base_type_name) add_base_type( base_type_name )
+      type_index = BossVM.add_type( this )
+
+    method add_base_type( base_type_name:String )
+      local base_type = BossVM.find_type( base_type_name )
+      if (not base_type) base_type = BossVM.find_type( "Object" )
+      base_types.add( base_type )
+
+    method add_method( m_name:String, m=null:BossMethod )->BossMethod
+      ensure m
+      local m_id = BossVM.string_to_id( m_name )
+      local entry = method_slot_lookup.find( m_id )
+      if (entry)
+        methods[ entry.value ] = m
+      else
+        method_slot_lookup[ m_id ] = methods.count
+        methods.add( m )
+        method_name_ids.add( m_id )
+      endIf
+      return m
 
     method call( m_name:String, args=null:Value )->BossTask
       local m = find_method( m_name )
       if (not m) return null
-      local boss_call = BossCall( this, m )
+      local boss_call = BossCall( BossValue.UNDEFINED, m )
       if (args)
         forEach (arg in args)
           boss_call.arg( BossValue(arg) )
@@ -407,13 +453,42 @@ class BossObject
       return boss_call()
 
     method find_method( name:String )->BossMethod
-      return find_method( BossVM.string_to_id(name) )
+      local entry = method_slot_lookup.find( BossVM.string_to_id(name) )
+      if (entry) return methods[ entry.value ]
 
-    method find_method( id:Int32 )->BossMethod
-      forEach (m in methods)
-        if (m.name_id == id) return m
+      forEach (type in base_types)
+        local m = type.find_method( name )
+        if (m)
+          add_method( name, m )
+          return m
+        endIf
       endForEach
+
       return null
+
+    method name->String
+      return BossVM.id_to_string( name_id )
+endClass
+
+class BossObject
+  PROPERTIES
+    type       : BossType
+    properties : BossValue[]
+
+  METHODS
+    method init( type )
+      ensure properties( type.property_count )
+
+    method call( m_name:String, args=null:Value )->BossTask
+      local m = type.find_method( m_name )
+      if (not m) return null
+      local boss_call = BossCall( this, m )
+      if (args)
+        forEach (arg in args)
+          boss_call.arg( BossValue(arg) )
+        endForEach
+      endIf
+      return boss_call()
 
 endClass
 
