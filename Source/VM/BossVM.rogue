@@ -6,7 +6,13 @@ local type_Object = BossType( "Object" )
 
 local m_add = type_Object.add_method( "add" )
 m_add.write( BossOpcode.READ_ARG_1 )
+#m_add.write( BossOpcode.READ_THIS )
 m_add.write( BossOpcode.READ_ARG_2 )
+#m_add.write( BossOpcode.READ_ARG_2 )
+#m_add.write( BossOpcode.CALL_2 )
+#m_add.write( vm.string_to_id("add") )
+#m_add.write( -1 )  # type index cache
+#m_add.write( -1 )  # method slot cache
 m_add.write( BossOpcode.ADD )
 m_add.write( BossOpcode.RETURN )
 
@@ -37,6 +43,14 @@ class BossVM [singleton]
     method init
       BossVM = this   # set singleton
 
+      # Classes #0..7 must correspond to BossValueType constants.
+      add_type( BossType("undefined") )
+      add_type( BossType("null") )
+      add_type( BossType("Logical") )
+      add_type( BossType("Int32") )
+      add_type( BossType("Real64") )
+      add_type( BossType("String") )
+      add_type( BossType("Object") )
       #method create_object( type_name:String )
       #method create_global_object(
 
@@ -119,10 +133,14 @@ enum BossOpcode
   NOP
   HALT
   RETURN
+  CALL_0
+  CALL_1
   CALL_2
+  CALL_N
   LITERAL_INT32
   LITERAL_REAL64
   STRING
+  READ_THIS
   READ_ARG_1
   READ_ARG_2
   READ_ARG_3
@@ -219,7 +237,16 @@ class BossTask
               return false
             endIf
 
+          case BossOpcode.CALL_0
+
+          case BossOpcode.CALL_1
+
           case BossOpcode.CALL_2
+            #call_stack.add( frame )
+            #local context = stack[ stack.count - 2 ]
+            #if (code[frame.ip+1] == context.type
+
+          case BossOpcode.CALL_N
 
           case BossOpcode.LITERAL_INT32
             stack.add( BossValue(code[frame.ip]) )
@@ -232,6 +259,9 @@ class BossTask
           case BossOpcode.STRING
             stack.add( BossValue(BossValueType.STRING, code[frame.ip]) )
             ++frame.ip
+
+          case BossOpcode.READ_THIS
+            stack.add( stack[frame.fp] )
 
           case BossOpcode.READ_ARG_1
             stack.add( stack[frame.fp+1] )
