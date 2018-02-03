@@ -9,19 +9,24 @@ m_add.write( BossOpcode.ADD )
 m_add.write( BossOpcode.RETURN )
 
 local m_hello = vm.type_Object.add_method( "hello" )
+m_hello.write( BossOpcode.READ_THIS )
+m_hello.write( BossOpcode.READ_THIS )
 m_hello.write( BossOpcode.STRING,  "Hello World!" )
 m_hello.write( BossOpcode.STRING,  "!!" )
-m_hello.write( BossOpcode.ADD )
+m_hello.write_call( "add", 2 )
+m_hello.write( BossOpcode.READ_THIS )
 m_hello.write( BossOpcode.LITERAL_INT32, 5 )
 m_hello.write( BossOpcode.LITERAL_INT32, 6 )
-m_hello.write( BossOpcode.ADD )
+m_hello.write_call( "add", 2 )
 m_hello.write_call( "add", 2 )
 m_hello.write( BossOpcode.PRINT )
 m_hello.write( BossOpcode.PRINTLN )
-m_hello.write( BossOpcode.READ_THIS )
-m_hello.write( BossOpcode.PRINT )
-m_hello.write( BossOpcode.PRINTLN )
-m_hello.write( BossOpcode.HALT )
+#m_hello.write( BossOpcode.READ_THIS )
+#m_hello.write( BossOpcode.PRINT )
+#m_hello.write( BossOpcode.PRINTLN )
+m_hello.write( BossOpcode.REPEAT_N, 1 )
+m_hello.write( 0 )
+m_hello.write( BossOpcode.RETURN )
 
 BossObject( "Object" ).call( "hello" )
 
@@ -294,6 +299,7 @@ enum BossOpcode
   CALL_1
   CALL_2
   CALL_N
+  REPEAT_N
   LITERAL_INT32
   LITERAL_REAL64
   STRING
@@ -318,35 +324,36 @@ class BossMethod
       name_index = BossVM.identifiers.index( name )
       ensure code
 
+    method ip->Int32
+      return code.count
+
     method name->String
       return BossVM.identifiers[ name_index ]
 
     method to->String
       return name + "()"
 
-    method write( opcode:BossOpcode, value:Int32 )->Int32
+    method write( opcode:BossOpcode, value:Int32 )
       write( opcode->Int32 )
-      return write( value )
+      write( value )
 
-    method write( opcode:BossOpcode, value:Real64 )->Int32
+    method write( opcode:BossOpcode, value:Real64 )
       write( opcode->Int32 )
+      write( BossVM.real64s.count )
       BossVM.real64s.add( value )
-      return write( BossVM.real64s.count - 1 )
 
-    method write( opcode:BossOpcode, value:String )->Int32
+    method write( opcode:BossOpcode, value:String )
       write( opcode->Int32 )
-      return write( value )
+      write( value )
 
-    method write( opcode:BossOpcode )->Int32
+    method write( opcode:BossOpcode )
       code.add( opcode->Int32 )
-      return code.count - 1
 
-    method write( value:Int32 )->Int32
+    method write( value:Int32 )
       code.add( value )
-      return code.count - 1
 
-    method write( value:String )->Int32
-      return write( BossVM.strings.index(value) )
+    method write( value:String )
+      write( BossVM.strings.index(value) )
 
     method write_call( method_name:String, arg_count:Int32 )
       write( BossOpcode.CALL_N )
@@ -413,9 +420,8 @@ class BossTask
             return false
 
           case BossOpcode.RETURN
-trace
             local result_sp = stack_index.last
-            local is_return_value_specified = stack_index.count > frame.fp+frame.arg_count
+            local is_return_value_specified = stack_index.count > (frame.fp+frame.arg_count+1)
 
             # Unwind stack
             local should_halt = false
@@ -423,9 +429,11 @@ trace
               local old_fp = frame.fp
               frame = call_stack.remove_last
               stack.count = stack_index[ old_fp ]
-              stack_index.count = old_fp + 1
+              stack_index.count = old_fp + 1    # stack_index.last has correct value
+              code = frame.m.code
             else
-              stack_index.count = 1   # set count instead of clear() to avoid zeroing data
+              # set count instead of clear() to avoid zeroing data; stack_index.last has correct value
+              stack_index.count = 1
               stack.count = 0
               should_halt = true
             endIf
@@ -488,6 +496,14 @@ trace
               frame = BossCallFrame( m, context_index, arg_count )
               code = m.code
             endBlock
+
+          case BossOpcode.REPEAT_N
+            if (code[frame.ip])
+              --code[ frame.ip ]
+              frame.ip = code[ frame.ip + 1 ]
+            else
+              frame.ip += 2
+            endIf
 
           case BossOpcode.LITERAL_INT32
             stack_index.add( stack.count )
