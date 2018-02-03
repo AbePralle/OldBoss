@@ -11,9 +11,14 @@ m_add.write( BossOpcode.RETURN )
 local m_hello = vm.type_Object.add_method( "hello" )
 m_hello.write( BossOpcode.STRING,  "Hello World!" )
 m_hello.write( BossOpcode.STRING,  "!!" )
-#m_hello.write( BossOpcode.LITERAL_INT32, 5 )
-#m_hello.write( BossOpcode.LITERAL_INT32, 6 )
 m_hello.write( BossOpcode.ADD )
+m_hello.write( BossOpcode.LITERAL_INT32, 5 )
+m_hello.write( BossOpcode.LITERAL_INT32, 6 )
+m_hello.write( BossOpcode.ADD )
+m_hello.write_call( "add", 2 )
+m_hello.write( BossOpcode.PRINT )
+m_hello.write( BossOpcode.PRINTLN )
+m_hello.write( BossOpcode.READ_THIS )
 m_hello.write( BossOpcode.PRINT )
 m_hello.write( BossOpcode.PRINTLN )
 m_hello.write( BossOpcode.HALT )
@@ -32,8 +37,7 @@ class BossVM [singleton]
 
     type_undefined   : BossType
     type_null        : BossType
-    type_LogicalTrue : BossType
-    type_LogicalFalse: BossType
+    type_Logical     : BossType
     type_Int32       : BossType
     type_Real64      : BossType
     type_String      : BossType
@@ -45,14 +49,13 @@ class BossVM [singleton]
     method init
       BossVM = this
 
-      type_undefined    = BossType( "undefined",    BossValueType.UNDEFINED )
-      type_null         = BossType( "null",         BossValueType.NULL )
-      type_LogicalTrue  = BossType( "LogicalTrue",  BossValueType.LOGICAL_TRUE )
-      type_LogicalFalse = BossType( "LogicalFalse", BossValueType.LOGICAL_FALSE )
+      type_undefined    = BossTypeUndefined()
+      type_null         = BossTypeNull()
+      type_Logical      = BossTypeLogical()
       type_Int32        = BossTypeInt32()
-      type_Real64       = BossType( "Real64",       BossValueType.REAL64 )
+      type_Real64       = BossTypeReal64()
       type_String       = BossTypeString()
-      type_Object       = BossType( "Object",       BossValueType.OBJECT )
+      type_Object       = BossTypeObject()
 
       ensure no_such_method
 
@@ -61,32 +64,36 @@ class BossVM [singleton]
       objects.add( object )
       return index
 
+    method op_add( stack:Real64[], lhs_sp:Int32, lhs_type:BossType, rhs_sp:Int32, rhs_type:BossType )
+      if (lhs_type is type_String or rhs_type is type_String)
+        local result = lhs_type->String(stack,lhs_sp) + rhs_type->String(stack,rhs_sp)
+        stack.add( type_String.type_index ).add( BossVM.strings.add(result) )
+
+      elseIf (lhs_type is type_undefined or rhs_type is type_undefined)
+        stack.add( type_Real64.type_index ).add( NaN )
+
+      elseIf (lhs_type.is_numberlike or rhs_type.is_numberlike)
+        local result = lhs_type->Real64(stack,lhs_sp) + rhs_type->Real64(stack,rhs_sp)
+        stack.add( type_Real64.type_index ).add( result )
+
+      else
+        stack.add( type_Real64.type_index ).add( NaN )
+
+      endIf
 endClass
-
-
-enum BossValueType
-  UNDEFINED
-  NULL
-  LOGICAL_FALSE
-  LOGICAL_TRUE
-  INT32
-  REAL64
-  STRING
-  OBJECT
-endEnum
 
 
 class BossType
   PROPERTIES
-    value_type    : BossValueType
-    slot_count    = 1
+    slot_count    : Int32
     type_index    : Int32
     name_index    : Int32
+    is_numberlike : Logical
     methods       = BossMethod[](5)
     method_lookup = Table<<Int32,Int32>>()
 
   METHODS
-    method init( name:String, value_type=BossValueType.OBJECT )
+    method init( name:String, slot_count=2, is_numberlike=false )
       name_index = BossVM.identifiers.index( name )
 
       local entry = BossVM.types.find( name )
@@ -115,7 +122,10 @@ class BossType
       return add_method( BossMethod(m_name) )
 
     method locate_method( m_name:String )->Int32?
-      local entry = method_lookup.find( BossVM.identifiers.index(m_name) )
+      return locate_method( BossVM.identifiers.index(m_name) )
+
+    method locate_method( m_name_index:Int32 )->Int32?
+      local entry = method_lookup.find( m_name_index )
       if (entry) return entry.value
       else       return null
 
@@ -124,6 +134,15 @@ class BossType
 
     method op_add( stack:Real64[], lhs_sp:Int32, rhs_sp:Int32, rhs_type:BossType )
       stack.add( BossVM.type_undefined.type_index )
+
+    method to->Int32( stack:Real64[], sp:Int32 )
+      return 0
+
+    method to->Logical( stack:Real64[], sp:Int32 )
+      return false
+
+    method to->Real64( stack:Real64[], sp:Int32 )
+      return 0.0
 
     method to->String
       return name
@@ -136,45 +155,110 @@ endClass
 class BossTypeInt32 : BossType
   METHODS
     method init
-      prior.init( "Int32", BossValueType.INT32 )
+      prior.init( "Int32", &is_numberlike )
 
-    method op_add( stack:Real64[], lhs_sp:Int32, rhs_sp:Int32, rhs_type:BossType )
-      which (rhs_type.value_type)
-        case BossValueType.UNDEFINED, BossValueType.NULL
-          stack.add( rhs_type.type_index )
-        case BossValueType.LOGICAL_FALSE
-          stack.add( type_index ).add( stack[lhs_sp+1] )
-        case BossValueType.LOGICAL_TRUE
-          stack.add( type_index ).add( stack[lhs_sp+1] + 1 )
-        case BossValueType.INT32
-          stack.add( type_index ).add( stack[lhs_sp+1] + stack[rhs_sp+1] )
-        case BossValueType.REAL64
-          stack.add( rhs_type.type_index ).add( stack[lhs_sp+1] + stack[rhs_sp+1] )
-        case BossValueType.STRING
-          stack.add( rhs_type.type_index ).add( stack[lhs_sp+1]->Int32 + BossVM.strings[stack[rhs_sp+1]] )
-        case BossValueType.OBJECT
-          stack.add( BossVM.type_undefined.type_index )
-        others
-          stack.add( BossVM.type_undefined.type_index )
-      endWhich
+    method to->Int32( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]->Int32
+
+    method to->Logical( stack:Real64[], sp:Int32 )
+      return (stack[sp+1] != 0)
+
+    method to->Real64( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]
 
     method to->String( stack:Real64[], sp:Int32 )
       return stack[ sp+1 ]->Int32->String
 endClass
 
+
+class BossTypeLogical : BossType
+  METHODS
+    method init
+      prior.init( "Logical", &is_numberlike )
+
+    method to->Int32( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]->Int32
+
+    method to->Logical( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ] != 0
+
+    method to->Real64( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]
+
+    method to->String( stack:Real64[], sp:Int32 )
+      return ?:{ stack[sp+1]:"true" || "false" }
+
+endClass
+
+
+class BossTypeNull : BossType
+  METHODS
+    method init
+      prior.init( "null", &slot_count=1, &is_numberlike )
+
+    method to->String( stack:Real64[], sp:Int32 )
+      return "null"
+endClass
+
+
+class BossTypeObject : BossType
+  METHODS
+    method init
+      prior.init( "Object" )
+
+    method to->Logical( stack:Real64[], sp:Int32 )
+      return true
+
+    method to->String( stack:Real64[], sp:Int32 )
+      return BossVM.objects[ stack[ sp+1 ] ]->String
+endClass
+
+
+class BossTypeReal64 : BossType
+  METHODS
+    method init
+      prior.init( "Real64", &is_numberlike )
+
+    method to->Int32( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]->Int32
+
+    method to->Logical( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ] != 0
+
+    method to->Real64( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]
+
+    method to->String( stack:Real64[], sp:Int32 )
+      return stack[ sp+1 ]->String
+endClass
+
+
 class BossTypeString : BossType
   METHODS
     method init
-      prior.init( "String", BossValueType.STRING )
+      prior.init( "String" )
 
-    method op_add( stack:Real64[], lhs_sp:Int32, rhs_sp:Int32, rhs_type:BossType )
-      local result = BossVM.strings[stack[lhs_sp+1]] + rhs_type->String(stack,rhs_sp)
-      stack.add( type_index )
-      stack.add( BossVM.strings.count )
-      BossVM.strings.list.add( result )
+    method to->Int32( stack:Real64[], sp:Int32 )
+      return BossVM.strings[ stack[ sp+1 ] ]->Int32
+
+    method to->Logical( stack:Real64[], sp:Int32 )
+      return true
+
+    method to->Real64( stack:Real64[], sp:Int32 )
+      return BossVM.strings[ stack[ sp+1 ] ]->Real64
 
     method to->String( stack:Real64[], sp:Int32 )
       return BossVM.strings[ stack[ sp+1 ] ]
+endClass
+
+
+class BossTypeUndefined : BossType
+  METHODS
+    method init
+      prior.init( "undefined", &slot_count=1 )
+
+    method to->String( stack:Real64[], sp:Int32 )
+      return "undefined"
 endClass
 
 
@@ -263,10 +347,18 @@ class BossMethod
 
     method write( value:String )->Int32
       return write( BossVM.strings.index(value) )
+
+    method write_call( method_name:String, arg_count:Int32 )
+      write( BossOpcode.CALL_N )
+      write( BossVM.identifiers.index(method_name) )
+      write( 0 )
+      write( 0 )
+      write( arg_count )
+
 endClass
 
 
-class BossCallFrame( m:BossMethod, ip=0:Int32, fp=0:Int32, arg_count=0:Int32, sp=0:Int32 ) [compound]
+class BossCallFrame( m:BossMethod, fp=0:Int32, arg_count=0:Int32, ip=0:Int32 ) [compound]
   METHODS
     method to->String
       return "$ @$" (m,ip)
@@ -320,35 +412,37 @@ class BossTask
             is_finished = true
             return false
 
-            #{
-
           case BossOpcode.RETURN
-            local result = ?:{ stack.count>frame.fp+frame.arg_count:stack.last || BossValue.UNDEFINED }
-            if (call_stack.count)
-              frame = call_stack.remove_last
-              stack.discard_from( frame.fp + frame.arg_count + 1 )
-              local slot_count = result.type.slot_count
-              if (slot_count == 1)
-                data_stack.discard_from( frame.dsp )
-              else
-                local dest = frame.dsp
-                local src = result.value->Int32
-                if (src != dest)
-                  result.value = src
-                  loop slot_count
-                    data_stack[ dest ] = data_stack[ src ]
-                    ++dest
-                    ++src
-                  endLoop
-                else
-                  dest += slot_count
-                endIf
-                data_stack.discard_from( dest )
-              endIf
-              stack.add( result )
+trace
+            local result_sp = stack_index.last
+            local is_return_value_specified = stack_index.count > frame.fp+frame.arg_count
 
+            # Unwind stack
+            local should_halt = false
+            if (call_stack.count)
+              local old_fp = frame.fp
+              frame = call_stack.remove_last
+              stack.count = stack_index[ old_fp ]
+              stack_index.count = old_fp + 1
             else
-              stack.clear.add( result )
+              stack_index.count = 1   # set count instead of clear() to avoid zeroing data
+              stack.count = 0
+              should_halt = true
+            endIf
+
+            if (is_return_value_specified)
+              # The stack has at least one extra value on it; copy it over as the result
+              loop type_list[ stack[result_sp] ].slot_count
+                stack.add( stack[result_sp] )
+                ++result_sp
+              endLoop
+            else
+              # No return value pushed on stack; add an 'undefined'.
+              stack_index.add( stack.count )
+              stack.add( vm.type_undefined.type_index )
+            endIf
+
+            if (should_halt)
               this.frame = frame
               is_finished = true
               return false
@@ -359,58 +453,115 @@ class BossTask
           case BossOpcode.CALL_1
 
           case BossOpcode.CALL_2
-            #call_stack.add( frame )
-            #local context = stack[ stack.count - 2 ]
-            #if (code[frame.ip+1] == context.type
 
           case BossOpcode.CALL_N
-            }#
+            # code[ip-5] : CALL_N
+            # code[ip-4] : method name_index
+            # code[ip-3] : cached type index
+            # code[ip-2] : cached method slot
+            # code[ip-1] : N (arg count)
+            block
+              frame.ip += 4
+              local arg_count     = code[ frame.ip - 1 ]
+              local context_index = stack_index.count - (arg_count+1)
+              local context_sp    = stack_index[ context_index ]
+              local context_type  = type_list[ stack[context_sp] ]
+              local m : BossMethod
+              if (context_type.type_index == code[frame.ip-3])
+                m = context_type.methods[ code[frame.ip-2] ]
+              else
+                local slot = context_type.locate_method( code[frame.ip-4] )
+                if (slot.exists)
+                  # Cache type index and slot index
+                  code[ frame.ip-3 ] = context_type.type_index
+                  code[ frame.ip-2 ] = slot.value
+                  m = context_type.methods[ slot.value ]
+                else
+                  # Method not found; pop context + args and replace with "undefined"
+                  stack_index.count = context_index + 1
+                  stack.count = context_sp + 1
+                  stack[ context_sp ] = vm.type_undefined.type_index
+                  escapeBlock
+                endIf
+              endIf
+              call_stack.add( frame )
+              frame = BossCallFrame( m, context_index, arg_count )
+              code = m.code
+            endBlock
 
           case BossOpcode.LITERAL_INT32
             stack_index.add( stack.count )
-            stack.add( BossVM.type_Int32.type_index )
+            stack.add( vm.type_Int32.type_index )
             stack.add( code[frame.ip] )
             ++frame.ip
 
-            #{
           case BossOpcode.LITERAL_REAL64
-            stack.add( BossValue(vm.real64s[code[frame.ip]]) )
+            stack_index.add( stack.count )
+            stack.add( vm.type_Real64.type_index )
+            stack.add( vm.real64s[code[frame.ip]] )
             ++frame.ip
-            }#
 
           case BossOpcode.STRING
             stack_index.add( stack.count )
-            stack.add( BossVM.type_String.type_index )
+            stack.add( vm.type_String.type_index )
             stack.add( code[frame.ip] )
             ++frame.ip
 
-            #{
           case BossOpcode.READ_THIS
-            stack.add( stack[frame.fp] )
+            stack_index.add( stack.count )
+            local src = stack_index[ frame.fp ]
+            local type_index = stack[ src ]
+            loop type_list[ type_index ].slot_count
+              stack.add( stack[src] )
+              ++src
+            endLoop
 
           case BossOpcode.READ_ARG_1
-            stack.add( stack[frame.fp+1] )
+            stack_index.add( stack.count )
+            local src = stack_index[ frame.fp + 1 ]
+            local type_index = stack[ src ]
+            loop type_list[ type_index ].slot_count
+              stack.add( stack[src] )
+              ++src
+            endLoop
 
           case BossOpcode.READ_ARG_2
-            stack.add( stack[frame.fp+2] )
+            stack_index.add( stack.count )
+            local src = stack_index[ frame.fp + 2 ]
+            local type_index = stack[ src ]
+            loop type_list[ type_index ].slot_count
+              stack.add( stack[src] )
+              ++src
+            endLoop
 
           case BossOpcode.READ_ARG_3
-            stack.add( stack[frame.fp+3] )
+            stack_index.add( stack.count )
+            local src = stack_index[ frame.fp + 3 ]
+            local type_index = stack[ src ]
+            loop type_list[ type_index ].slot_count
+              stack.add( stack[src] )
+              ++src
+            endLoop
 
           case BossOpcode.READ_ARG_N
-            stack.add( stack[frame.fp+code[frame.ip]] )
+            stack_index.add( stack.count )
+            local src = stack_index[ frame.fp + code[frame.ip] ]
             ++frame.ip
-            }#
+            local type_index = stack[ src ]
+            loop type_list[ type_index ].slot_count
+              stack.add( stack[src] )
+              ++src
+            endLoop
 
           case BossOpcode.ADD
             local rhs_sp = stack_index.remove_last
             local lhs_sp = stack_index.last
             stack.count = lhs_sp
-            type_list[ stack[lhs_sp]->Int32 ].op_add( stack, lhs_sp, rhs_sp, type_list[stack[rhs_sp]->Int32] )
+            vm.op_add( stack, lhs_sp, type_list[stack[lhs_sp]->Int32], rhs_sp, type_list[stack[rhs_sp]->Int32] )
 
           case BossOpcode.PRINT
             local sp = stack_index.remove_last
-            print BossVM.type_list[ stack[sp]->Int32 ]->String( stack, sp )
+            print vm.type_list[ stack[sp]->Int32 ]->String( stack, sp )
             stack.count = sp
 
           case BossOpcode.PRINTLN
@@ -454,6 +605,11 @@ class BossStringIndexTable
 
     method init( initial_capacity:Int32 )
       ensure list( initial_capacity )
+
+    method add( value:String )->Int32
+      # Adds a string without comparing it to existing strings
+      list.add( value )
+      return list.count - 1
 
     method count->Int32 [macro]
       this.list.count
