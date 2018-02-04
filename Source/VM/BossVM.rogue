@@ -2,47 +2,23 @@ module Boss
 
 local vm = BossVM()
 
-local m_add = vm.type_Object.add_method( "add",
-  function(task:BossTask)
-    local lhs_type = task.arg_type( 1 )
-    local rhs_type = task.arg_type( 1 )
-    if (lhs_type.is_string or rhs_type.is_string)
-      task.push( task.arg_string(1) + task.arg_string(2) )
-    elseIf (lhs_type.is_undefined or rhs_type.is_undefined)
-      task.push_undefined
-    elseIf (lhs_type.is_number or rhs_type.is_number)
-      task.push( task.arg_real64(1) + task.arg_real64(2) )
-    else
-      task.push( NaN )
-    endIf
-  endFunction
-)
+local type_Custom = vm.define_type( "Custom" ).extends( "Object" )
 
-vm.type_Object.add_method( "wow", (task) => println "Woo-hoo!" )
+local m_test = vm.find_type("Object").create_method( "test" )
+m_test.write( BossOpcode.STRING, "Hello World!" )
+m_test.write( BossOpcode.PRINT )
+m_test.write( BossOpcode.PRINTLN )
+m_test.write( BossOpcode.RETURN )
 
-local m_hello = vm.type_Object.add_method( "hello" )
-m_hello.write( BossOpcode.READ_THIS )
-m_hello.write( BossOpcode.READ_THIS )
-m_hello.write( BossOpcode.STRING,  "Hello World!" )
-m_hello.write( BossOpcode.STRING,  "!!" )
-m_hello.write_call( "add", 2 )
-m_hello.write( BossOpcode.READ_THIS )
-m_hello.write( BossOpcode.LITERAL_INT32, 5 )
-m_hello.write( BossOpcode.LITERAL_INT32, 6 )
-m_hello.write_call( "add", 2 )
-m_hello.write_call( "add", 2 )
-m_hello.write( BossOpcode.PRINT )
-m_hello.write( BossOpcode.PRINTLN )
-m_hello.write( BossOpcode.READ_THIS )
-m_hello.write_call( "wow" )
-#m_hello.write( BossOpcode.READ_THIS )
-#m_hello.write( BossOpcode.PRINT )
-#m_hello.write( BossOpcode.PRINTLN )
-m_hello.write( BossOpcode.REPEAT, 1 )
-m_hello.write( 0 )
-m_hello.write( BossOpcode.RETURN )
+BossObject( "Custom" ).call( "test" )
 
-BossObject( "Object" ).call( "hello" )
+m_test = vm.find_type("Object").create_method( "test" )
+m_test.write( BossOpcode.STRING, "It changed!" )
+m_test.write( BossOpcode.PRINT )
+m_test.write( BossOpcode.PRINTLN )
+m_test.write( BossOpcode.RETURN )
+
+BossObject( "Custom" ).call( "test" )
 
 class BossVM [singleton]
   PROPERTIES
@@ -51,8 +27,10 @@ class BossVM [singleton]
     identifiers      = BossStringIndexTable()
     real64s          = Real64[]
 
-    types            = StringTable<<BossType>>()
-    type_list        = BossType[]
+    types            = BossType[]
+    type_lookup      = StringTable<<BossType>>()
+
+    methods          = BossMethod[]
 
     type_undefined   : BossType
     type_null        : BossType
@@ -64,17 +42,19 @@ class BossVM [singleton]
 
     no_such_method   : BossTask
 
+    visited_types    = BossType[]
+
   METHODS
     method init
       BossVM = this
 
-      type_undefined    = BossTypeUndefined()
-      type_null         = BossTypeNull()
-      type_Logical      = BossTypeLogical()
-      type_Int32        = BossTypeInt32()
-      type_Real64       = BossTypeReal64()
-      type_String       = BossTypeString()
-      type_Object       = BossTypeObject()
+      type_undefined    = BossTypeUndefined( this )
+      type_null         = BossTypeNull( this )
+      type_Logical      = BossTypeLogical( this )
+      type_Int32        = BossTypeInt32( this )
+      type_Real64       = BossTypeReal64( this )
+      type_String       = BossTypeString( this )
+      type_Object       = BossTypeObject( this )
 
       ensure no_such_method
 
@@ -82,6 +62,18 @@ class BossVM [singleton]
       local index = objects.count
       objects.add( object )
       return index
+
+    method define_type( type_name:String, base_name=null:String )->BossType
+      local type = find_type( type_name )
+      if (not type) type = BossTypeObject( this, type_name )
+      if (not type.base_types.count) type.base_types.add( type_Object )
+      if (base_name) type.extends( base_name )
+      return type
+
+    method find_type( name:String )->BossType
+      local entry = type_lookup.find( name )
+      if (entry) return entry.value
+      else       return null
 
     method op_add( stack:Real64[], lhs_sp:Int32, lhs_type:BossType, rhs_sp:Int32, rhs_type:BossType )
       if (lhs_type is type_String or rhs_type is type_String)
@@ -101,44 +93,75 @@ class BossVM [singleton]
       endIf
 endClass
 
+class BossError : Error;
 
 class BossType
   PROPERTIES
-    slot_count    : Int32
-    type_index    : Int32
-    name_index    : Int32
-    is_numberlike : Logical
-    methods       = BossMethod[](5)
-    method_lookup = Table<<Int32,Int32>>()
+    vm                 : BossVM
+    slot_count         : Int32
+    type_index         : Int32
+    name_index         : Int32
+    is_numberlike      : Logical
+    method_indices     = Int32[](5)
+    method_slot_lookup = Table<<Int32,Int32>>()
+    base_types         = BossType[](2)
+    is_visited         : Logical  # helper flag for recursive searches
 
   METHODS
-    method init( name:String, slot_count=2, is_numberlike=false )
-      name_index = BossVM.identifiers.index( name )
+    method init( vm, name:String, slot_count=2, is_numberlike=false )
+      name_index = vm.identifiers.index( name )
 
-      local entry = BossVM.types.find( name )
+      local entry = vm.type_lookup.find( name )
       if (entry)
         # Replace existing type definition
         type_index = entry.value.type_index
-        BossVM.type_list[ type_index ] = this
+        vm.types[ type_index ] = this
       else
-        type_index = BossVM.type_list.count
-        BossVM.type_list.add( this )
+        type_index = vm.types.count
+        vm.types.add( this )
       endIf
-      BossVM.types[ name ] = this
+      vm.type_lookup[ name ] = this
+
+    method extends( type_name:String )->this
+      if (not this.is_object) throw BossError( "Non-object type $ cannot have a base type." (this) )
+
+      local base_type = vm.find_type( type_name )
+      if (not base_type) base_type = vm.define_type( base_type )
+
+      if (not base_type.is_object) throw BossError( "Type $ cannot extend non-object type $." (this,base_type) )
+
+      if (base_type.instance_of(this))
+        throw BossError( "Attempted circular inheritance - $ cannot extend $ because $ extends $." (this,base_type,base_type,this) )
+      endIf
+
+      if ((forEach in base_types) is base_type) return this   # already in list
+
+      base_types.add( base_type )
+      return this
 
     method add_method( m:BossMethod )->BossMethod
-      local entry = method_lookup.find( m.name_index )
+      local entry = method_slot_lookup.find( m.name_index )
       if (entry)
-        methods[ entry.value ] = m
+        m.method_index = vm.methods[ entry.value ].method_index
+        vm.methods[ m.method_index ] = m
       else
-        local slot = methods.count
-        methods.add( m )
-        method_lookup[ m.name_index ] = slot
+        m.method_index = vm.methods.count
+        vm.methods.add( m )
+        local slot = method_indices.count
+        method_indices.add( m.method_index )
+        method_slot_lookup[ m.name_index ] = slot
       endIf
       return m
 
-    method add_method( m_name:String, native_handler=null:Function(BossTask) )->BossMethod
+    method create_method( m_name:String, native_handler=null:Function(BossTask) )->BossMethod
       return add_method( BossMethod(m_name,native_handler) )
+
+    method instance_of( base_type:BossType )->Logical
+      if (this is base_type) return true
+      if ((forEach in base_types).instance_of(base_type)) return true
+      if (not this.is_object) return false
+      if (base_type is vm.type_Object) return true
+      return false
 
     method is_int32->Logical
       return false
@@ -165,18 +188,52 @@ class BossType
       return false
 
     method locate_method( m_name:String )->Int32?
-      return locate_method( BossVM.identifiers.index(m_name) )
+      return locate_method( vm.identifiers.index(m_name) )
 
     method locate_method( m_name_index:Int32 )->Int32?
-      local entry = method_lookup.find( m_name_index )
-      if (entry) return entry.value
-      else       return null
+      local entry = method_slot_lookup.find( m_name_index )
+      if (entry)
+        return entry.value
+      endIf
+
+      local result : BossMethod
+      forEach (base_type in base_types step -1)
+        result = base_type._find_method_recursively( m_name_index )
+        if (result) escapeForEach
+      endForEach
+
+      (forEach in vm.visited_types).is_visited = false
+      vm.visited_types.clear
+
+      if (result)
+        add_method( result )
+        return locate_method( m_name_index )  # will work for sure
+      endIf
+
+      return null
+
+    method _find_method_recursively( m_name_index:Int32 )->BossMethod
+      if (is_visited) return null
+
+      local entry = method_slot_lookup.find( m_name_index )
+      if (entry) return vm.methods[ method_indices[ entry.value ] ]
+
+      is_visited = true
+      vm.visited_types.add( this )
+
+      # Search base types in reverse order
+      forEach (base_type in base_types step -1)
+        local result = base_type._find_method_recursively( m_name_index )
+        if (result) return result
+      endForEach
+
+      return null
 
     method name->String
-      return BossVM.identifiers[ name_index ]
+      return vm.identifiers[ name_index ]
 
     method op_add( stack:Real64[], lhs_sp:Int32, rhs_sp:Int32, rhs_type:BossType )
-      stack.add( BossVM.type_undefined.type_index )
+      stack.add( vm.type_undefined.type_index )
 
     method to->Int32( stack:Real64[], sp:Int32 )
       return 0
@@ -197,8 +254,8 @@ endClass
 
 class BossTypeInt32 : BossType
   METHODS
-    method init
-      prior.init( "Int32", &is_numberlike )
+    method init( vm:BossVM )
+      prior.init( vm, "Int32", &is_numberlike )
 
     method is_int32->Logical
       return true
@@ -222,8 +279,8 @@ endClass
 
 class BossTypeLogical : BossType
   METHODS
-    method init
-      prior.init( "Logical", &is_numberlike )
+    method init( vm:BossVM )
+      prior.init( vm, "Logical", &is_numberlike )
 
     method is_logical->Logical
       return true
@@ -245,8 +302,8 @@ endClass
 
 class BossTypeNull : BossType
   METHODS
-    method init
-      prior.init( "null", &slot_count=1, &is_numberlike )
+    method init( vm:BossVM )
+      prior.init( vm, "null", &slot_count=1, &is_numberlike )
 
     method is_null->Logical
       return true
@@ -258,8 +315,8 @@ endClass
 
 class BossTypeObject : BossType
   METHODS
-    method init
-      prior.init( "Object" )
+    method init( vm:BossVM, type_name="Object":String )
+      prior.init( vm, type_name )
 
     method is_object->Logical
       return true
@@ -274,8 +331,8 @@ endClass
 
 class BossTypeReal64 : BossType
   METHODS
-    method init
-      prior.init( "Real64", &is_numberlike )
+    method init( vm:BossVM )
+      prior.init( vm, "Real64", &is_numberlike )
 
     method is_number->Logical
       return true
@@ -299,8 +356,8 @@ endClass
 
 class BossTypeString : BossType
   METHODS
-    method init
-      prior.init( "String" )
+    method init( vm:BossVM )
+      prior.init( vm, "String" )
 
     method is_string->Logical
       return true
@@ -321,8 +378,8 @@ endClass
 
 class BossTypeUndefined : BossType
   METHODS
-    method init
-      prior.init( "undefined", &slot_count=1 )
+    method init( vm:BossVM )
+      prior.init( vm, "undefined", &slot_count=1 )
 
     method is_undefined->Logical
       return true
@@ -339,13 +396,13 @@ class BossObject
 
   METHODS
     method init( type_name:String )
-      type = ?:{ BossVM.types[type_name] || BossVM.type_Object }
+      type = ?:{ BossVM.type_lookup[type_name] || BossVM.type_Object }
       object_index = BossVM.add_object( this )
 
     method call( method_name:String )->BossTask
       local slot = type.locate_method( method_name )
       if (slot.exists)
-        local task = BossTask( type.methods[slot.value] )
+        local task = BossTask( type.vm.methods[ type.method_indices[slot.value] ] )
         task.push( this )
         task.execute
         return task
@@ -378,6 +435,7 @@ endEnum
 class BossMethod
   PROPERTIES
     name_index     : Int32
+    method_index   : Int32
     code           : Int32[]
     native_handler : Function(BossTask)
 
@@ -443,6 +501,7 @@ class BossTask
     call_stack  : BossCallFrame[]
 
     exists      = true
+      # false if this task was created to handle a call to a method that did not exist
     is_finished : Logical
 
     repeat_call : Logical
@@ -451,8 +510,9 @@ class BossTask
     method init
       exists = false
       is_finished = true
+      vm = BossVM
       (ensure stack_index(1)).add( 0 )
-      (ensure stack(1)).add( BossVM.type_undefined.type_index )
+      (ensure stack(1)).add( vm.type_undefined.type_index )
 
     method init( m:BossMethod )
       ensure stack
@@ -487,7 +547,7 @@ class BossTask
 
     method arg_type( index:Int32 )->BossType
       if (index < 0 or index > frame.arg_count) return vm.type_undefined
-      return vm.type_list[ stack[stack_index[frame.fp + index]] ]
+      return vm.types[ stack[stack_index[frame.fp + index]] ]
 
     method execute->Logical
       if (is_finished) return false
@@ -497,7 +557,7 @@ class BossTask
       local stack_index = this.stack_index
       local frame       = this.frame
       local code        = frame.m.code
-      local type_list   = BossVM.type_list
+      local types       = vm.types
       loop
         local opcode = BossOpcode( code[ frame.ip ] )
         ++frame.ip
@@ -531,7 +591,7 @@ class BossTask
 
             if (is_return_value_specified)
               # The stack has at least one extra value on it; copy it over as the result
-              loop type_list[ stack[result_sp] ].slot_count
+              loop types[ stack[result_sp] ].slot_count
                 stack.add( stack[result_sp] )
                 ++result_sp
               endLoop
@@ -557,17 +617,17 @@ class BossTask
               local arg_count     = code[ frame.ip - 1 ]
               local context_index = stack_index.count - (arg_count+1)
               local context_sp    = stack_index[ context_index ]
-              local context_type  = type_list[ stack[context_sp] ]
+              local context_type  = types[ stack[context_sp] ]
               local m : BossMethod
               if (context_type.type_index == code[frame.ip-3])
-                m = context_type.methods[ code[frame.ip-2] ]
+                m = vm.methods[ context_type.method_indices[ code[frame.ip-2] ] ]
               else
                 local slot = context_type.locate_method( code[frame.ip-4] )
                 if (slot.exists)
                   # Cache type index and slot index
                   code[ frame.ip-3 ] = context_type.type_index
                   code[ frame.ip-2 ] = slot.value
-                  m = context_type.methods[ slot.value ]
+                  m = vm.methods[ context_type.method_indices[ slot.value ] ]
                 else
                   # Method not found; pop context + args and replace with "undefined"
                   stack_index.count = context_index + 1
@@ -585,6 +645,7 @@ class BossTask
                   repeat_call = false
                   frame = call_stack.remove_last
                   frame.ip -= 5
+                  return true  # pause for now but keep running task
                 else
                   # perform RETURN
                   local result_sp = stack_index.last
@@ -599,7 +660,7 @@ class BossTask
 
                   if (is_return_value_specified)
                     # The stack has at least one extra value on it; copy it over as the result
-                    loop type_list[ stack[result_sp] ].slot_count
+                    loop types[ stack[result_sp] ].slot_count
                       stack.add( stack[result_sp] )
                       ++result_sp
                     endLoop
@@ -643,7 +704,7 @@ class BossTask
             stack_index.add( stack.count )
             local src = stack_index[ frame.fp ]
             local type_index = stack[ src ]
-            loop type_list[ type_index ].slot_count
+            loop types[ type_index ].slot_count
               stack.add( stack[src] )
               ++src
             endLoop
@@ -652,7 +713,7 @@ class BossTask
             stack_index.add( stack.count )
             local src = stack_index[ frame.fp + 1 ]
             local type_index = stack[ src ]
-            loop type_list[ type_index ].slot_count
+            loop types[ type_index ].slot_count
               stack.add( stack[src] )
               ++src
             endLoop
@@ -661,7 +722,7 @@ class BossTask
             stack_index.add( stack.count )
             local src = stack_index[ frame.fp + 2 ]
             local type_index = stack[ src ]
-            loop type_list[ type_index ].slot_count
+            loop types[ type_index ].slot_count
               stack.add( stack[src] )
               ++src
             endLoop
@@ -670,7 +731,7 @@ class BossTask
             stack_index.add( stack.count )
             local src = stack_index[ frame.fp + 3 ]
             local type_index = stack[ src ]
-            loop type_list[ type_index ].slot_count
+            loop types[ type_index ].slot_count
               stack.add( stack[src] )
               ++src
             endLoop
@@ -680,7 +741,7 @@ class BossTask
             local src = stack_index[ frame.fp + code[frame.ip] ]
             ++frame.ip
             local type_index = stack[ src ]
-            loop type_list[ type_index ].slot_count
+            loop types[ type_index ].slot_count
               stack.add( stack[src] )
               ++src
             endLoop
@@ -689,11 +750,11 @@ class BossTask
             local rhs_sp = stack_index.remove_last
             local lhs_sp = stack_index.last
             stack.count = lhs_sp
-            vm.op_add( stack, lhs_sp, type_list[stack[lhs_sp]->Int32], rhs_sp, type_list[stack[rhs_sp]->Int32] )
+            vm.op_add( stack, lhs_sp, types[stack[lhs_sp]->Int32], rhs_sp, types[stack[rhs_sp]->Int32] )
 
           case BossOpcode.PRINT
             local sp = stack_index.remove_last
-            print vm.type_list[ stack[sp]->Int32 ]->String( stack, sp )
+            print vm.types[ stack[sp]->Int32 ]->String( stack, sp )
             stack.count = sp
 
           case BossOpcode.PRINTLN
@@ -703,6 +764,10 @@ class BossTask
             throw Error( "Unhandled opcode in BossVM: " + opcode )
         endWhich
       endLoop
+
+    method peek_type->BossType
+      if (stack_index.count == 0) return vm.type_undefined
+      return vm.types[ stack[ stack_index.last ] ]
 
     method push( value:Int32 )->this
       stack_index.add( stack.count )
@@ -716,11 +781,11 @@ class BossTask
       stack.add( ?:{value:1||0} )
       return this
 
-    method push( object:BossObject )->this
-      if (object is null) return push_null
+    method push( value:BossObject )->this
+      if (value is null) return push_null
       stack_index.add( stack.count )
-      stack.add( object.type.type_index  )
-      stack.add( object.object_index  )
+      stack.add( value.type.type_index  )
+      stack.add( value.object_index  )
       return this
 
     method push( value:Real64 )->this
@@ -730,6 +795,7 @@ class BossTask
       return this
 
     method push( value:String )->this
+      if (value is null) return push_null
       stack_index.add( stack.count )
       stack.add( vm.type_String.type_index )
       stack.add( vm.strings.add(value) )
@@ -744,6 +810,8 @@ class BossTask
       stack_index.add( stack.count )
       stack.add( vm.type_undefined.type_index )
       return this
+
+    method result_type->BossType
 
 endClass
 
