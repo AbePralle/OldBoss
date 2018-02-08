@@ -1,7 +1,137 @@
 module Boss
 
 local vm = BossVM()
+vm.literal_real64s.add( 4.5 )
 
+local m = BossMethod( vm )
+m.write( BossOpcode.LITERAL_INT32 )
+m.write( 5 )
+m.write( BossOpcode.LITERAL_REAL64 ).write( 0 )
+m.write( BossOpcode.ADD )
+m.write( BossOpcode.PRINTLN )
+m.write( BossOpcode.HALT )
+BossTask(m).execute
+
+class BossVM
+  PROPERTIES
+    literal_real64s = Real64[]
+
+  METHODS
+endClass
+
+class BossMethod
+  PROPERTIES
+    vm   : BossVM
+    code = Int32[]
+
+  METHODS
+    method init( vm )
+
+    method ip->Int32
+      return code.count
+
+    method write( opcode:BossOpcode )->this
+      code.add( opcode->Int32 )
+      return this
+
+    method write( value:Int32 )->this
+      code.add( value )
+      return this
+endClass
+
+class BossError : Error
+endClass
+
+class BossCallFrame( m:BossMethod, ip=0:Int32 ) [compound]
+endClass
+
+enum BossOpcode
+  NOP
+  HALT
+  LITERAL_INT32
+  LITERAL_REAL64
+  ADD
+  PRINTLN
+endEnum
+
+enum BossDataType
+  UNDEFINED
+  NUMBER
+
+  METHODS
+    method can_convert_to_number->Logical
+      return (this == NUMBER)
+
+endEnum
+
+class BossTask
+  PROPERTIES
+    vm          : BossVM
+    frame       : BossCallFrame
+    type_stack  = BossDataType[]
+    data_stack  = Real64[]  # every 4 spots is 1 stack entry to accommodate max data size
+
+  METHODS
+    method init( m:BossMethod )
+      vm = m.vm
+      frame = BossCallFrame( m )
+
+    method execute
+      local code = frame.m.code
+      local type_stack = this.type_stack
+      local data_stack = this.data_stack
+
+      loop
+        which (code[frame.ip])
+          case BossOpcode.NOP
+            ++frame.ip
+
+          case BossOpcode.HALT
+            return
+
+          case BossOpcode.LITERAL_INT32
+            type_stack.add( BossDataType.NUMBER )
+            data_stack.add( code[frame.ip+1] ).expand( 3 )
+            frame.ip += 2
+
+          case BossOpcode.LITERAL_REAL64
+            type_stack.add( BossDataType.NUMBER )
+            data_stack.add( vm.literal_real64s[code[frame.ip+1]] ).expand( 3 )
+            frame.ip += 2
+
+          case BossOpcode.ADD
+            ++frame.ip
+            --type_stack.count
+            local lhs_index = type_stack.count - 1
+            local lhs_type = type_stack[ lhs_index ]
+            local rhs_type = type_stack[ lhs_index+1 ]
+            local lhs_sp = data_stack.count - 8
+            local rhs_sp = lhs_sp + 4
+            data_stack.count = rhs_sp
+
+            if (lhs_type.can_convert_to_number and rhs_type.can_convert_to_number)
+              type_stack[ lhs_index ] = BossDataType.NUMBER
+              data_stack[ lhs_sp ] = data_stack[ lhs_sp ] + data_stack[ rhs_sp ]
+
+            else
+              type_stack.last = BossDataType.NUMBER
+              data_stack[ lhs_sp ] = NaN
+
+            endIf
+
+          case BossOpcode.PRINTLN
+            ++frame.ip
+            trace type_stack.remove_last
+            data_stack.count -= 4
+            trace data_stack[ data_stack.count ]
+
+          others
+            throw BossError( "[Boss] Unsupported opcode: $ $" (code[frame.ip],BossOpcode(code[frame.ip])) )
+        endWhich
+      endLoop
+endClass
+
+#{
 vm.type( "Random" ).create_method( "number",
   function(task:BossTask)
     which (task.arg_count)
@@ -37,7 +167,7 @@ class BossVM [singleton]
     objects          = BossObject[]
     strings          = BossStringIndexTable()
     identifiers      = BossStringIndexTable()
-    numbers          = Real64[]
+    real_numbers     = Real64[]
 
     types            = BossType[]
     type_lookup      = StringTable<<BossType>>()
@@ -466,8 +596,8 @@ class BossMethod
 
     method write( opcode:BossOpcode, value:Real64 )->this
       write( opcode->Int32 )
-      write( vm.numbers.count )
-      vm.numbers.add( value )
+      write( vm.real_numbers.count )
+      vm.real_numbers.add( value )
       return this
 
     method write( type:BossType )->this
@@ -715,7 +845,7 @@ class BossTask
           case BossOpcode.LITERAL_REAL64
             stack_index.add( stack_data.count )
             stack_data.add( type_Number.type_index )
-            stack_data.add( vm.numbers[code[frame.ip]] )
+            stack_data.add( vm.real_numbers[code[frame.ip]] )
             ++frame.ip
 
           case BossOpcode.STRING
@@ -936,3 +1066,4 @@ class BossStringIndexTable
 
 endClass
 
+}#
